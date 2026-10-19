@@ -644,8 +644,10 @@ const getAdminContestResults = async (req, res, next) => {
         await connectDB();
         const { id } = req.params;
 
-        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-        const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+        const pageRaw = typeof req.query.page === 'string' ? req.query.page : '';
+        const limitRaw = typeof req.query.limit === 'string' ? req.query.limit : '';
+        const page = Math.max(1, parseInt(pageRaw, 10) || 1);
+        const limit = Math.min(100, Math.max(1, parseInt(limitRaw, 10) || 25));
         const skip = (page - 1) * limit;
 
         const contest = await Contest.findById(id).select('title description startTime endTime durationMinutes questions.marks').lean();
@@ -653,7 +655,89 @@ const getAdminContestResults = async (req, res, next) => {
             return res.status(404).json({ success: false, error: 'Contest not found' });
         }
 
+        const maxScore = (contest.questions || []).reduce((sum, q) => sum + (q.marks || 0), 0);
         const match = { contest: contest._id, status: 'Completed' };
+
+        // --- Filters ---
+        const qRaw = typeof req.query.q === 'string' ? req.query.q : '';
+        const q = qRaw.trim().slice(0, 100);
+        const scoreFilter = typeof req.query.score === 'string' ? req.query.score : '';
+        const dateFilter = typeof req.query.date === 'string' ? req.query.date : '';
+        const sortFilter = typeof req.query.sort === 'string' ? req.query.sort : 'highest';
+
+        const filterStages = [];
+        let userPopulated = false;
+
+        // Cheap score and date filters first
+        if (scoreFilter) {
+            switch (scoreFilter) {
+                case 'full': filterStages.push({ $match: { totalScore: maxScore } }); break;
+                case 'half_plus': filterStages.push({ $match: { totalScore: { $gte: maxScore / 2 } } }); break;
+                case 'below_half': filterStages.push({ $match: { totalScore: { $lt: maxScore / 2 } } }); break;
+                case 'zero': filterStages.push({ $match: { totalScore: 0 } }); break;
+            }
+        }
+
+        if (dateFilter) {
+            const now = new Date();
+            let startDate;
+            switch (dateFilter) {
+                case '24h': startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000); break;
+                case '7days': startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
+                case '30days': startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); break;
+            }
+            if (startDate) {
+                filterStages.push({ $match: { submittedAt: { $gte: startDate } } });
+            }
+        }
+
+        // Expensive user lookup and search match last
+        if (q) {
+            filterStages.push({
+                $lookup: {
+                    from: 'users',
+                    localField: 'user',
+                    foreignField: '_id',
+                    as: 'user',
+                    pipeline: [{ $project: { name: 1, email: 1 } }],
+                },
+            });
+            filterStages.push({ $unwind: { path: '$user', preserveNullAndEmptyArrays: true } });
+            const safeQ = escapeRegex(q);
+            const rx = { $regex: safeQ, $options: 'i' };
+            filterStages.push({ $match: { $or: [{ "user.name": rx }, { "user.email": rx }] } });
+            userPopulated = true;
+        }
+
+        // _id breaks ties, otherwise equal scores can repeat or skip across pages.
+        let sortStage;
+        switch (sortFilter) {
+            case 'lowest': sortStage = { $sort: { totalScore: 1, submittedAt: 1, _id: 1 } }; break;
+            case 'newest': sortStage = { $sort: { submittedAt: -1, _id: -1 } }; break;
+            case 'oldest': sortStage = { $sort: { submittedAt: 1, _id: 1 } }; break;
+            default: sortStage = { $sort: { totalScore: -1, submittedAt: 1, _id: 1 } }; break;
+        }
+
+        const rowsPipeline = [
+            ...filterStages,
+            sortStage,
+            { $skip: skip },
+            { $limit: limit },
+        ];
+
+        if (!userPopulated) {
+            rowsPipeline.push({
+                $lookup: {
+                    from: 'users',
+                    localField: 'user',
+                    foreignField: '_id',
+                    as: 'user',
+                    pipeline: [{ $project: { name: 1, email: 1 } }],
+                },
+            });
+            rowsPipeline.push({ $unwind: { path: '$user', preserveNullAndEmptyArrays: true } });
+        }
+        rowsPipeline.push({ $project: { user: 1, totalScore: 1, submittedAt: 1 } });
 
         // One round trip for the page of rows plus whole-set stats. The $project
         // drops each submission's embedded answers/testCaseResults, which is the
@@ -662,30 +746,16 @@ const getAdminContestResults = async (req, res, next) => {
             { $match: match },
             {
                 $facet: {
-                    rows: [
-                        // _id breaks ties, otherwise equal scores can repeat or skip across pages.
-                        { $sort: { totalScore: -1, submittedAt: 1, _id: 1 } },
-                        { $skip: skip },
-                        { $limit: limit },
-                        {
-                            $lookup: {
-                                from: 'users',
-                                localField: 'user',
-                                foreignField: '_id',
-                                as: 'user',
-                                pipeline: [{ $project: { name: 1, email: 1 } }],
-                            },
-                        },
-                        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-                        { $project: { user: 1, totalScore: 1, submittedAt: 1 } },
-                    ],
-                    meta: [{ $group: { _id: null, total: { $sum: 1 }, avg: { $avg: '$totalScore' } } }],
+                    wholeMeta: [{ $group: { _id: null, total: { $sum: 1 }, avg: { $avg: '$totalScore' } } }],
+                    filteredMeta: [...filterStages, { $group: { _id: null, total: { $sum: 1 } } }],
+                    rows: rowsPipeline,
                 },
             },
         ]);
 
-        const { total = 0, avg = 0 } = facet?.meta?.[0] || {};
-        const maxScore = (contest.questions || []).reduce((sum, q) => sum + (q.marks || 0), 0);
+        const { total: wholeTestParticipants = 0, avg = 0 } = facet?.wholeMeta?.[0] || {};
+        const { total: filteredTotal = 0 } = facet?.filteredMeta?.[0] || {};
+        const rows = facet?.rows || [];
 
         res.status(200).json({
             success: true,
@@ -697,8 +767,9 @@ const getAdminContestResults = async (req, res, next) => {
                 endTime: contest.endTime,
                 maxScore,
             },
-            results: facet?.rows || [],
-            total,
+            results: rows,
+            total: filteredTotal,
+            wholeTestParticipants,
             averageScore: avg || 0,
             page,
             limit,
