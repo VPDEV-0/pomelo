@@ -11,12 +11,14 @@ import { toast } from "@/components/ui/banner";
 import { readViolationCount, MAX_VIOLATIONS } from "@/lib/attempt-integrity";
 import TestTimer from "./test-timer";
 import SubmitConfirmDialog from "./submit-confirm-dialog";
+import type { ProblemMeta } from "./question-nav";
 
 interface TestHeaderProps {
   initialTimeRemaining: number;
+  problems: ProblemMeta[];
 }
 
-export default function TestHeader({ initialTimeRemaining }: TestHeaderProps) {
+export default function TestHeader({ initialTimeRemaining, problems }: TestHeaderProps) {
   const router = useRouter();
   const params = useParams();
   const { data: session } = useSession();
@@ -104,6 +106,7 @@ export default function TestHeader({ initialTimeRemaining }: TestHeaderProps) {
       <SubmitConfirmDialog
         open={showConfirmDialog}
         isSubmitting={isSubmitting}
+        problems={problems}
         onConfirm={handleConfirmFinish}
         onCancel={() => setShowConfirmDialog(false)}
       />

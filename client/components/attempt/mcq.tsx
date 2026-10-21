@@ -307,6 +307,7 @@ export default function MCQScreen({ problem, problems }: MCQScreenProps) {
       </Card>
 
       <SubmitConfirmDialog
+        problems={sortedProblems.map((p) => ({ id: String(p.id), type: p.type }))}
         open={showSubmitDialog}
         isSubmitting={isSubmitting}
         onConfirm={handleFinishConfirm}
