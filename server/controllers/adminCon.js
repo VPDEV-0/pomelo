@@ -656,26 +656,35 @@ const getAdminContestResults = async (req, res, next) => {
         }
 
         const maxScore = (contest.questions || []).reduce((sum, q) => sum + (q.marks || 0), 0);
+        const scoreFilterMeaningful = maxScore > 0;
         const match = { contest: contest._id, status: 'Completed' };
 
         // --- Filters ---
         const qRaw = typeof req.query.q === 'string' ? req.query.q : '';
         const q = qRaw.trim().slice(0, 100);
-        const scoreFilter = typeof req.query.score === 'string' ? req.query.score : '';
+        const scoreMinRaw = typeof req.query.scoreMin === 'string' ? req.query.scoreMin : '';
+        const scoreMaxRaw = typeof req.query.scoreMax === 'string' ? req.query.scoreMax : '';
         const dateFilter = typeof req.query.date === 'string' ? req.query.date : '';
         const sortFilter = typeof req.query.sort === 'string' ? req.query.sort : 'highest';
 
         const filterStages = [];
         let userPopulated = false;
 
-        // Cheap score and date filters first
-        if (scoreFilter) {
-            switch (scoreFilter) {
-                case 'full': filterStages.push({ $match: { totalScore: maxScore } }); break;
-                case 'half_plus': filterStages.push({ $match: { totalScore: { $gte: maxScore / 2 } } }); break;
-                case 'below_half': filterStages.push({ $match: { totalScore: { $lt: maxScore / 2 } } }); break;
-                case 'zero': filterStages.push({ $match: { totalScore: 0 } }); break;
-            }
+        // Cheap score range and date filters first. Query params arrive as strings;
+        // Number('') === 0, so empty must map to NaN explicitly or "no filter" would
+        // silently become $gte: 0. Number.isFinite rejects NaN, 'abc' and Infinity -
+        // invalid input is ignored, never a 500. Clamped server-side to [0, maxScore].
+        // Do NOT clamp the admin's bounds to maxScore. Clamping min to maxScore
+        // turns "min 20" into "min 10" on a 10-mark test, silently matching
+        // perfect scores. The filter must mean what was typed: min 20 on a
+        // 10-mark test correctly matches nobody. Only guard against negatives.
+        const scoreMin = scoreMinRaw !== '' ? Number(scoreMinRaw) : NaN;
+        if (Number.isFinite(scoreMin) && scoreFilterMeaningful) {
+            filterStages.push({ $match: { totalScore: { $gte: Math.max(0, scoreMin) } } });
+        }
+        const scoreMax = scoreMaxRaw !== '' ? Number(scoreMaxRaw) : NaN;
+        if (Number.isFinite(scoreMax) && scoreFilterMeaningful) {
+            filterStages.push({ $match: { totalScore: { $lte: Math.max(0, scoreMax) } } });
         }
 
         if (dateFilter) {
@@ -757,6 +766,9 @@ const getAdminContestResults = async (req, res, next) => {
         const { total: filteredTotal = 0 } = facet?.filteredMeta?.[0] || {};
         const rows = facet?.rows || [];
 
+        const scoreFilterIgnored =
+            (scoreMinRaw !== '' || scoreMaxRaw !== '') && !scoreFilterMeaningful;
+
         res.status(200).json({
             success: true,
             contest: {
@@ -767,6 +779,9 @@ const getAdminContestResults = async (req, res, next) => {
                 endTime: contest.endTime,
                 maxScore,
             },
+            warnings: scoreFilterIgnored
+                ? ['This contest has no configured marks; score filters were ignored.']
+                : [],
             results: rows,
             total: filteredTotal,
             wholeTestParticipants,

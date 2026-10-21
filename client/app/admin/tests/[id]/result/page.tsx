@@ -23,6 +23,7 @@ import { LocalTime } from "@/components/ui/local-time";
 import ExportResultsButtons from "@/components/admin/test/export-results-buttons";
 import { Pagination } from "@/components/admin/pagination";
 import { ResultFilterBar } from "@/components/admin/test/result-filter-bar";
+import { SearchFocusKeeper } from "@/components/admin/test/search-focus-keeper";
 import { Suspense } from "react";
 
 const RESULTS_PAGE_SIZE = 25;
@@ -90,7 +91,8 @@ export default async function AdminTestResultPage({
         limit: String(RESULTS_PAGE_SIZE),
     });
     if (sp.q) qs.set("q", sp.q);
-    if (sp.score) qs.set("score", sp.score);
+    if (sp.scoreMin) qs.set("scoreMin", sp.scoreMin);
+    if (sp.scoreMax) qs.set("scoreMax", sp.scoreMax);
     if (sp.date) qs.set("date", sp.date);
     if (sp.sort) qs.set("sort", sp.sort);
 
@@ -140,7 +142,8 @@ export default async function AdminTestResultPage({
     // "X of Y" badge logic: Sort alone does not trigger it
     const isFilterActive = !!(
         sp.q || 
-        (sp.score && sp.score !== "all") || 
+        sp.scoreMin ||
+        sp.scoreMax || 
         (sp.date && sp.date !== "any")
     );
 
@@ -200,7 +203,9 @@ export default async function AdminTestResultPage({
                         </div>
                     </div>
 
-                    <Suspense fallback={<div className="h-10 animate-pulse bg-muted rounded-md mb-6" />}>
+                    <SearchFocusKeeper />
+
+                    <Suspense fallback={null}>
                         <ResultFilterBar maxScore={contest.maxScore} />
                     </Suspense>
 
